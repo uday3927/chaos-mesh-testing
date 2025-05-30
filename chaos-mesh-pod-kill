@@ -1,0 +1,144 @@
+kind: TestWorkflow
+apiVersion: testworkflows.testkube.io/v1
+metadata:
+  name: chaos-mesh-pod-kill-debug
+  namespace: testkube
+  labels:
+    target: adservice
+    test-type: chaos-engineering
+    test-workflow-templates: "yes"
+    tool: chaos-mesh
+spec:
+  use:
+  - name: serviceaccount--fullaccess
+  container:
+    workingDir: /data
+    resources:
+      limits:
+        cpu: 200m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  execution:
+    tags:
+      chaos-engineering: "true"
+      tool: chaos-mesh
+  steps:
+  - name: debug-environment
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        echo "=== Environment Debug ==="
+        echo "User ID: $(id)"
+        echo "Service Account: testkube (from mount)"
+        echo "Token exists: $(test -f /var/run/secrets/kubernetes.io/serviceaccount/token && echo YES || echo NO)"
+
+        echo -e "\n=== Connectivity Test ==="
+        kubectl version --client
+        kubectl get namespaces | head -5
+
+        echo -e "\n=== Permission Test ==="
+        kubectl auth can-i list pods -n default && echo "✅ Can list pods" || echo "❌ Cannot list pods"
+        kubectl auth can-i create podchaos.chaos-mesh.org -n default && echo "✅ Can create chaos" || echo "❌ Cannot create chaos"
+  - name: pre-chaos-verification
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        echo "=== Pre-chaos verification ==="
+        echo "Looking for adservice pods in default namespace..."
+
+        # First try: direct pod listing
+        echo "All pods in default namespace:"
+        kubectl get pods -n default
+
+        echo -e "\nFiltering for adservice:"
+        kubectl get pods -n default -l app=adservice
+
+        # Check if any adservice pods exist
+        POD_COUNT=$(kubectl get pods -n default -l app=adservice --no-headers 2>/dev/null | wc -l)
+        echo "Found $POD_COUNT adservice pods"
+
+        if [ "$POD_COUNT" -eq 0 ]; then
+          echo "ERROR: No adservice pods found!"
+          echo "Available pods with labels:"
+          kubectl get pods -n default --show-labels
+          exit 1
+        fi
+
+        echo "✅ Target pods found, ready for chaos!"
+        kubectl get pods -n default -l app=adservice -o wide
+  - name: apply-chaos-experiment
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        echo "=== Applying Chaos Experiment ==="
+
+        # Generate unique chaos name using timestamp
+        CHAOS_NAME="pod-kill-$(date +%s)"
+        echo "Chaos experiment name: $CHAOS_NAME"
+
+        # Create chaos experiment YAML
+        cat > chaos.yaml << EOF
+        kind: PodChaos
+        apiVersion: chaos-mesh.org/v1alpha1
+        metadata:
+          namespace: default
+          name: pod-killing
+        spec:
+          selector:
+            namespaces:
+              - default
+            labelSelectors:
+              app: adservice
+          mode: all
+          action: pod-kill
+          duration: "30s"
+        EOF
+
+        echo "Chaos experiment YAML:"
+        cat chaos.yaml
+
+        # Apply the chaos experiment
+        kubectl apply -f chaos.yaml
+        echo "✅ Chaos experiment applied"
+
+        # Store chaos name for cleanup
+        echo $CHAOS_NAME > chaos-name.txt
+  - name: monitor-chaos-effects
+    run:
+      image: bitnami/kubectl:latest
+      shell: "echo \"=== Monitoring Chaos Effects ===\"\nCHAOS_NAME=$(cat chaos-name.txt)\necho
+        \"Monitoring chaos experiment: $CHAOS_NAME\"\n\n# Monitor for 60 seconds\nfor
+        i in {1..12}; do\n  echo -e \"\\n--- Check $i/12 ($(date)) ---\"\n  \n  #
+        Show current pod status\n  echo \"Current adservice pods:\"\n  kubectl get
+        pods -n default -l app=adservice -o wide\n  \n  # Show chaos experiment status\n
+        \ echo \"Chaos experiment status:\"\n  kubectl get podchaos $CHAOS_NAME -n
+        default -o wide 2>/dev/null || echo \"Chaos experiment not found\"\n  \n  sleep
+        5\ndone\n"
+  - name: cleanup-and-verify
+    condition: always
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        echo "=== Cleanup and Recovery Verification ==="
+
+        # Get chaos name for cleanup
+        CHAOS_NAME=$(cat chaos-name.txt 2>/dev/null || echo "unknown")
+
+        # Wait for pods to be ready
+        echo "Waiting for adservice pods to recover..."
+        kubectl wait --for=condition=Ready pods -l app=adservice -n default --timeout=120s || echo "Some pods still recovering"
+
+        # Show final state
+        echo -e "\nFinal adservice pod state:"
+        kubectl get pods -n default -l app=adservice -o wide
+
+        # Cleanup chaos experiment
+        if [ "$CHAOS_NAME" != "unknown" ]; then
+          echo -e "\nCleaning up chaos experiment: $CHAOS_NAME"
+          kubectl delete podchaos $CHAOS_NAME -n default --ignore-not-found=true
+        fi
+
+        echo "✅ Chaos engineering test completed successfully!"
+status: {}
