@@ -1,0 +1,60 @@
+# Service Account for Chaos Testing
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: testkube-chaos-testing
+  namespace: testkube
+---
+# Cluster Role for Chaos Testing
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: testkube-chaos-testing
+rules:
+- apiGroups: [""]
+  resources: ["pods", "events"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["chaos-mesh.org"]
+  resources: ["podchaos", "networkchaos", "iochaos", "stresschaos", "timechaos"]
+  verbs: ["get", "list", "create", "delete", "patch", "update", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+---
+# Bind SA to the ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: testkube-chaos-testing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: testkube-chaos-testing
+subjects:
+- kind: ServiceAccount
+  name: testkube-chaos-testing
+  namespace: testkube
+---
+# Cluster Role for API server access to Chaos Mesh (for workflows)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chaos-mesh-access
+rules:
+- apiGroups: ["chaos-mesh.org"]
+  resources: ["podchaos", "networkchaos", "iochaos", "stresschaos", "timechaos"]
+  verbs: ["get", "list", "create", "delete", "patch", "update", "watch"]
+---
+# Bind testkube-api-server to the chaos role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: testkube-chaos-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chaos-mesh-access
+subjects:
+- kind: ServiceAccount
+  name: testkube-api-server
+  namespace: testkube
